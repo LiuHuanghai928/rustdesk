@@ -1,0 +1,35 @@
+name: Sync upstream 1.5.3 and rebuild
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync upstream 1.5.3 and apply local patches
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init repo
+          cd repo
+          git remote add origin "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git"
+          git remote add upstream https://github.com/rustdesk/rustdesk.git
+          git fetch --depth=1 origin master
+          git fetch --depth=1 upstream refs/tags/1.5.3:refs/remotes/upstream-1.5.3
+          git show origin/master:scripts/apply-local-patch.py > /tmp/apply-local-patch.py
+          git checkout -B master refs/remotes/upstream-1.5.3
+          git checkout origin/master -- .github/workflows/
+          git checkout origin/master -- scripts/
+          python3 /tmp/apply-local-patch.py .
+          git config user.name "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
+          git add -A
+          git diff --cached --name-only -- .github/workflows | sed 's/^/WF_CHANGED: /' || true
+          git commit -m "Sync upstream rustdesk 1.5.3 with local patches (secure_tcp + self-hosted update)"
+          git push -f origin master
