@@ -51,6 +51,24 @@ def bump_line(path, prefix, new_line):
     return False
 
 
+def ensure_upload_tag(path, version):
+    """Set the nightly upload tag, inserting it when the file carries none."""
+    prefix = '      upload-tag: "'
+    new_line = '      upload-tag: "v%s"' % version
+    if bump_line(path, prefix, new_line):
+        return True
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        lines = f.readlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "with:":
+            indent = line[: len(line) - len(line.lstrip())] + "  "
+            lines.insert(i + 1, indent + new_line.lstrip() + _ending(line))
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.writelines(lines)
+            return True
+    return False
+
+
 def main(root, version):
     parts = version.split(".")
     if len(parts) != 3 or not all(p.isdigit() for p in parts):
@@ -70,10 +88,8 @@ def main(root, version):
         ),
         (
             ".github/workflows/flutter-nightly.yml",
-            bump_line(
-                os.path.join(root, ".github/workflows/flutter-nightly.yml"),
-                '      upload-tag: "',
-                '      upload-tag: "v%s"' % version,
+            ensure_upload_tag(
+                os.path.join(root, ".github/workflows/flutter-nightly.yml"), version
             ),
         ),
     ]
