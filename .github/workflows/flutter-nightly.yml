@@ -15,4 +15,4 @@ jobs:
     secrets: inherit
     with:
       upload-artifact: true
-      upload-tag: "v1.5.5"
+      upload-tag: "v1.5.6"
