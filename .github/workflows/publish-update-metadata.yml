@@ -1,0 +1,106 @@
+name: Publish update metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach metadata to (e.g. v1.5.3)"
+        required: true
+        default: "v1.5.3"
+
+permissions:
+  contents: write
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh release download "${{ inputs.tag }}" --dir assets --repo "${{ github.repository }}"
+          echo "--- assets ---"
+          ls -l assets
+      - name: Build and sign update metadata
+        env:
+          UPDATE_SIGNING_KEY_B64: ${{ secrets.UPDATE_SIGNING_KEY_B64 }}
+          TAG_NAME: ${{ inputs.tag }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check pynacl
+          python3 - <<'PY'
+          import base64, hashlib, json, os, re
+          from datetime import datetime, timezone
+          from nacl.signing import SigningKey
+
+          TAG = os.environ["TAG_NAME"]
+          OWNER, REPO = os.environ["REPO_FULL"].split("/")
+          VERSION = TAG[1:] if TAG.startswith("v") else TAG
+          KEY = base64.b64decode(os.environ["UPDATE_SIGNING_KEY_B64"])
+
+          PATTERN = re.compile(r"^rustdesk-(\d+\.\d+\.\d+)-(x86_64|aarch64|x86)\.(exe|msi|dmg)$")
+          prefix = "https://github.com/%s/%s/releases/download/%s/" % (OWNER, REPO, TAG)
+
+          artifacts = []
+          skipped = []
+          for name in sorted(os.listdir("assets")):
+              match = PATTERN.match(name)
+              if not match:
+                  skipped.append(name)
+                  continue
+              _, arch, fmt = match.groups()
+              platform = "windows" if fmt in ("exe", "msi") else "macos"
+              path = os.path.join("assets", name)
+              data = open(path, "rb").read()
+              artifacts.append({
+                  "platform": platform,
+                  "arch": arch,
+                  "format": fmt,
+                  "url": prefix + name,
+                  "file_name": name,
+                  "size": len(data),
+                  "sha256": hashlib.sha256(data).hexdigest(),
+              })
+
+          metadata = {
+              "schema_version": 1,
+              "app": "rustdesk",
+              "package_id": "rustdesk",
+              "version": VERSION,
+              "release_id": TAG,
+              "published_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "signature_key_id": "2026-ed25519-main",
+              "artifacts": artifacts,
+          }
+          metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+          open("rustdesk-update.json", "wb").write(metadata_bytes)
+
+          signing_key = SigningKey(KEY)
+          signed = signing_key.sign(b"RustDesk update metadata v1\n" + metadata_bytes)
+          sig = {
+              "schema_version": 1,
+              "algorithm": "ed25519",
+              "key_id": "2026-ed25519-main",
+              "signature": base64.b64encode(signed.signature).decode("ascii"),
+          }
+          open("rustdesk-update.json.sig", "w", encoding="utf-8").write(json.dumps(sig, separators=(",", ":")))
+
+          print("artifacts included:")
+          for item in artifacts:
+              print("  %s  %s/%s" % (item["file_name"], item["platform"], item["arch"] + "/" + item["format"]))
+          print("skipped:")
+          for item in skipped:
+              print("  " + item)
+          if not artifacts:
+              raise SystemExit("no release asset matched the update artifact pattern")
+          PY
+      - name: Upload metadata and signature
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ inputs.tag }}" rustdesk-update.json rustdesk-update.json.sig --clobber --repo "${{ github.repository }}"

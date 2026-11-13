@@ -107,7 +107,7 @@ pub(super) fn verified_update_artifact_from_release_page_url(
     let release_id = release_id_from_update_url(update_url)?;
     let display_version = display_version_from_release_id(&release_id)?;
     let expected_artifact_url_prefix =
-        format!("https://github.com/rustdesk/rustdesk/releases/download/{release_id}/");
+        format!("https://www.mycloudserver.top/rustdesk/{release_id}/");
     let metadata_url = format!("{expected_artifact_url_prefix}rustdesk-update.json");
     let signature_url = format!("{metadata_url}.sig");
     let metadata_bytes = fetch_update_sidecar_bytes(&metadata_url)?;
@@ -157,9 +157,9 @@ fn read_limited_response_bytes<R: Read>(
 pub fn get_update_download_file_from_url(url: &str) -> Option<PathBuf> {
     let parsed = url::Url::parse(url).ok()?;
     // Check the raw prefix before Url normalizes default ports.
-    if !url.starts_with("https://github.com/")
+    if !url.starts_with("https://www.mycloudserver.top/rustdesk/")
         || parsed.scheme() != "https"
-        || parsed.host_str() != Some("github.com")
+        || parsed.host_str() != Some("www.mycloudserver.top")
         || !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.port().is_some()
@@ -170,17 +170,11 @@ pub fn get_update_download_file_from_url(url: &str) -> Option<PathBuf> {
     }
 
     let mut segments = parsed.path_segments()?;
-    let owner = segments.next()?;
     let repo = segments.next()?;
-    let releases = segments.next()?;
-    let download = segments.next()?;
     let tag = segments.next()?;
     let filename = segments.next()?;
 
-    if owner != "rustdesk"
-        || repo != "rustdesk"
-        || releases != "releases"
-        || download != "download"
+    if repo != "rustdesk"
         || tag.is_empty()
         || segments.next().is_some()
         || !is_plain_update_filename(filename)
@@ -214,7 +208,7 @@ mod tests {
     #[test]
     fn update_download_file_accepts_expected_github_asset_urls() {
         let file = get_update_download_file_from_url(
-            "https://github.com/rustdesk/rustdesk/releases/download/1.4.0/rustdesk-1.4.0-x86_64.dmg",
+            "https://www.mycloudserver.top/rustdesk/1.4.0/rustdesk-1.4.0-x86_64.dmg",
         )
         .expect("valid GitHub release asset URL");
 
@@ -227,16 +221,16 @@ mod tests {
     #[test]
     fn update_download_file_rejects_untrusted_or_malformed_urls() {
         for url in [
-            "http://github.com/rustdesk/rustdesk/releases/download/1/rustdesk.exe",
+            "http://www.mycloudserver.top/rustdesk/1/rustdesk.exe",
             "https://example.com/rustdesk.exe",
-            "https://github.com/other/project/releases/download/1/rustdesk.exe",
-            "https://github.com/rustdesk/rustdesk/releases/download/1/",
-            "https://github.com/rustdesk/rustdesk/releases/download/1/nested/rustdesk.exe",
-            "https://github.com/rustdesk/rustdesk/releases/download/1/C:rustdesk.exe",
-            "https://user@github.com/rustdesk/rustdesk/releases/download/1/rustdesk.exe",
-            "https://github.com:443/rustdesk/rustdesk/releases/download/1/rustdesk.exe",
-            "https://github.com/rustdesk/rustdesk/releases/download/1/rustdesk.exe?download=1",
-            "https://github.com/rustdesk/rustdesk/releases/download/1/rustdesk.exe#download",
+            "https://www.mycloudserver.top/other/1/rustdesk.exe",
+            "https://www.mycloudserver.top/rustdesk/1/",
+            "https://www.mycloudserver.top/rustdesk/1/nested/rustdesk.exe",
+            "https://www.mycloudserver.top/rustdesk/1/C:rustdesk.exe",
+            "https://user@www.mycloudserver.top/rustdesk/1/rustdesk.exe",
+            "https://www.mycloudserver.top:443/rustdesk/1/rustdesk.exe",
+            "https://www.mycloudserver.top/rustdesk/1/rustdesk.exe?download=1",
+            "https://www.mycloudserver.top/rustdesk/1/rustdesk.exe#download",
             "not a url",
         ] {
             assert!(get_update_download_file_from_url(url).is_none(), "{url}");

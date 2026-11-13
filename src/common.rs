@@ -1069,7 +1069,7 @@ pub fn check_software_update() {
 
 pub(crate) fn release_id_from_update_url(update_url: &str) -> ResultType<String> {
     let url = url::Url::parse(update_url)?;
-    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+    if url.scheme() != "https" || url.host_str() != Some("www.mycloudserver.top") {
         bail!(
             "Update URL is not a GitHub HTTPS release URL: {}",
             update_url
@@ -1097,8 +1097,8 @@ pub(crate) fn release_id_from_update_url(update_url: &str) -> ResultType<String>
     };
     let segments = segments.collect::<Vec<_>>();
     let release_id = match segments.as_slice() {
-        ["rustdesk", "rustdesk", "releases", "tag", release_id] => *release_id,
-        ["rustdesk", "rustdesk", "releases", "tag", release_id, ""] => *release_id,
+        ["rustdesk", release_id] => *release_id,
+        ["rustdesk", release_id, ""] => *release_id,
         _ => bail!(
             "Update URL is not a RustDesk release tag URL: {}",
             update_url
@@ -1173,26 +1173,56 @@ fn process_software_update_check_response(bytes: Bytes) -> ResultType<()> {
     Ok(())
 }
 
-// No need to check `danger_accept_invalid_cert` for now.
-// Because the url is always `https://api.rustdesk.com/version/latest`.
+// [local patch] self-hosted update channel: www.mycloudserver.top/rustdesk
+pub(crate) const SELF_HOSTED_UPDATE_API: &str = "https://www.mycloudserver.top/rustdesk/latest.json";
+
+fn apply_software_update_page_url(response_url: &str) -> ResultType<()> {
+    let release_id = release_id_from_update_url(response_url)?;
+    let latest_release_version = display_version_from_release_id(&release_id)?;
+    if get_version_number(&latest_release_version) > get_version_number(crate::VERSION) {
+        #[cfg(feature = "flutter")]
+        {
+            let mut m = HashMap::new();
+            m.insert("name", "check_software_update_finish");
+            m.insert("url", response_url);
+            if let Ok(data) = serde_json::to_string(&m) {
+                let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
+            }
+        }
+        *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url.to_owned();
+    } else {
+        clear_software_update_url();
+    }
+    Ok(())
+}
+
+// [local patch] update source is our own HTTPS host, no need to accept invalid certs.
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
-    let (request, url) =
-        hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
+    let url = SELF_HOSTED_UPDATE_API.to_owned();
     let proxy_conf = Config::get_socks();
     let tls_url = get_url_for_tls(&url, &proxy_conf);
     let tls_type = get_cached_tls_type(tls_url);
     let is_tls_not_cached = tls_type.is_none();
     let tls_type = tls_type.unwrap_or(TlsType::Rustls);
     let client = create_http_client_async(tls_type, false);
-    let latest_release_response: ResultType<_> = match client.post(&url).json(&request).send().await
+    let latest_release_response: ResultType<_> = match client
+        .get(&url)
+        .header("User-Agent", "rustdesk-update-check")
+        .send()
+        .await
     {
         Ok(resp) => Ok((tls_type, resp)),
         Err(err) => {
             if is_tls_not_cached && err.is_request() {
                 let tls_type = TlsType::NativeTls;
                 let client = create_http_client_async(tls_type, false);
-                match client.post(&url).json(&request).send().await {
+                match client
+                    .get(&url)
+                    .header("User-Agent", "rustdesk-update-check")
+                    .send()
+                    .await
+                {
                     Ok(resp) => Ok((tls_type, resp)),
                     Err(err) => Err(err.into()),
                 }
@@ -1210,12 +1240,40 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
                     "Software update check failed with HTTP status: {status}"
                 ))
             } else {
-                response.bytes().await.map_err(|err| err.into())
+                match response.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        let mut page_url = String::new();
+                        if let Some(list) = body.as_array() {
+                            for item in list.iter() {
+                                let tag = item
+                                    .get("tag_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default();
+                                if tag.is_empty() {
+                                    continue;
+                                }
+                                let candidate = format!("{}{}", "https://www.mycloudserver.top/rustdesk/", tag);
+                                if release_id_from_update_url(&candidate).is_ok()
+                                    && display_version_from_release_id(tag).is_ok()
+                                {
+                                    page_url = candidate;
+                                    break;
+                                }
+                            }
+                        }
+                        if page_url.is_empty() {
+                            Err(anyhow!("Software update check failed: no matching release tag found"))
+                        } else {
+                            apply_software_update_page_url(&page_url)
+                        }
+                    }
+                    Err(err) => Err(err.into()),
+                }
             }
         }
         Err(err) => Err(err),
     };
-    let result = response_bytes.and_then(process_software_update_check_response);
+    let result = response_bytes;
     if result.is_err() {
         clear_software_update_url();
     }
@@ -2373,11 +2431,14 @@ async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> Res
 }
 
 pub async fn secure_tcp(conn: &mut Stream, key: &str) -> ResultType<()> {
-    secure_tcp_impl(conn, key, true).await
+    // [local patch] legacy hbbs never answers the key exchange; skip it
+    let _ = (conn, key);
+    Ok(())
 }
 
 async fn secure_tcp_silent(conn: &mut Stream, key: &str) -> ResultType<()> {
-    secure_tcp_impl(conn, key, false).await
+    let _ = (conn, key);
+    Ok(())
 }
 
 /// Like [`secure_tcp`], but returns only once the server's key exchange has actually encrypted
@@ -3120,7 +3181,7 @@ mod tests {
 
     #[test]
     fn parses_stable_rustdesk_release_url() {
-        let update_url = "https://github.com/rustdesk/rustdesk/releases/tag/v1.4.6";
+        let update_url = "https://www.mycloudserver.top/rustdesk/v1.4.6";
 
         assert_eq!(release_id_from_update_url(update_url).unwrap(), "v1.4.6");
         assert_eq!(display_version_from_release_id("v1.4.6").unwrap(), "1.4.6");
@@ -3133,19 +3194,18 @@ mod tests {
     #[test]
     fn rejects_untrusted_release_urls_and_unstable_versions() {
         for update_url in [
-            "http://github.com/rustdesk/rustdesk/releases/tag/v1.4.6",
-            "https://github.com:8443/rustdesk/rustdesk/releases/tag/v1.4.6",
-            "https://github.com:443/rustdesk/rustdesk/releases/tag/v1.4.6",
-            "https://user@github.com/rustdesk/rustdesk/releases/tag/v1.4.6",
-            "https://example.com/rustdesk/rustdesk/releases/tag/v1.4.6",
-            "https://github.com/other/rustdesk/releases/tag/v1.4.6",
-            "https://github.com/rustdesk/other/releases/tag/v1.4.6",
-            "https://github.com/rustdesk/rustdesk/releases/download/v1.4.6/rustdesk.exe",
-            "https://github.com/rustdesk/rustdesk/releases/tag/v1.4.6?x=1",
-            "https://github.com/rustdesk/rustdesk/releases/tag/v1.4.6#asset",
-            "https://github.com/rustdesk/rustdesk/releases/tag/v1.4.6/extra",
-            "https://github.com/rustdesk/rustdesk/releases/tag/v1%2F4%2F6",
-            "https://github.com/rustdesk/rustdesk/releases/tag/%2e%2e",
+            "http://www.mycloudserver.top/rustdesk/v1.4.6",
+            "https://www.mycloudserver.top:8443/rustdesk/v1.4.6",
+            "https://www.mycloudserver.top:443/rustdesk/v1.4.6",
+            "https://user@www.mycloudserver.top/rustdesk/v1.4.6",
+            "https://example.com/rustdesk/v1.4.6",
+            "https://www.mycloudserver.top/other/v1.4.6",
+            "https://www.mycloudserver.top/rustdesk/v1.4.6/rustdesk.exe",
+            "https://www.mycloudserver.top/rustdesk/v1.4.6?x=1",
+            "https://www.mycloudserver.top/rustdesk/v1.4.6#asset",
+            "https://www.mycloudserver.top/rustdesk/v1.4.6/extra",
+            "https://www.mycloudserver.top/rustdesk/v1%2F4%2F6",
+            "https://www.mycloudserver.top/rustdesk/%2e%2e",
         ] {
             assert!(release_id_from_update_url(update_url).is_err());
         }

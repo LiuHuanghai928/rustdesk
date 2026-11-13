@@ -1,0 +1,32 @@
+name: Sync upstream master
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync upstream master and apply local patches
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init repo
+          cd repo
+          git remote add origin "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git"
+          git remote add upstream https://github.com/rustdesk/rustdesk.git
+          git fetch --depth=1 origin master
+          git fetch --depth=1 upstream master:refs/remotes/upstream-master
+          git checkout -B master refs/remotes/upstream-master
+          git checkout origin/master -- .github/workflows/
+          git checkout origin/master -- scripts/
+          python3 scripts/apply-local-patch.py .
+          git config user.name "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "Sync upstream rustdesk master with local patches; keep fork workflows"
+          git push -f origin master
