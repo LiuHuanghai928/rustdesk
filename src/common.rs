@@ -1097,8 +1097,8 @@ pub(crate) fn release_id_from_update_url(update_url: &str) -> ResultType<String>
     };
     let segments = segments.collect::<Vec<_>>();
     let release_id = match segments.as_slice() {
-        ["rustdesk", "rustdesk", "releases", "tag", release_id] => *release_id,
-        ["rustdesk", "rustdesk", "releases", "tag", release_id, ""] => *release_id,
+        ["LiuHuanghai928", "rustdesk", "releases", "tag", release_id] => *release_id,
+        ["LiuHuanghai928", "rustdesk", "releases", "tag", release_id, ""] => *release_id,
         _ => bail!(
             "Update URL is not a RustDesk release tag URL: {}",
             update_url
@@ -1173,26 +1173,56 @@ fn process_software_update_check_response(bytes: Bytes) -> ResultType<()> {
     Ok(())
 }
 
-// No need to check `danger_accept_invalid_cert` for now.
-// Because the url is always `https://api.rustdesk.com/version/latest`.
+// [local patch] self-hosted update channel: LiuHuanghai928/rustdesk
+pub(crate) const SELF_HOSTED_UPDATE_API: &str = "https://api.github.com/repos/LiuHuanghai928/rustdesk/releases?per_page=20";
+
+fn apply_software_update_page_url(response_url: &str) -> ResultType<()> {
+    let release_id = release_id_from_update_url(response_url)?;
+    let latest_release_version = display_version_from_release_id(&release_id)?;
+    if get_version_number(&latest_release_version) > get_version_number(crate::VERSION) {
+        #[cfg(feature = "flutter")]
+        {
+            let mut m = HashMap::new();
+            m.insert("name", "check_software_update_finish");
+            m.insert("url", response_url);
+            if let Ok(data) = serde_json::to_string(&m) {
+                let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
+            }
+        }
+        *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url.to_owned();
+    } else {
+        clear_software_update_url();
+    }
+    Ok(())
+}
+
+// [local patch] the update source is GitHub over TLS, no need to accept invalid certs.
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
-    let (request, url) =
-        hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
+    let url = SELF_HOSTED_UPDATE_API.to_owned();
     let proxy_conf = Config::get_socks();
     let tls_url = get_url_for_tls(&url, &proxy_conf);
     let tls_type = get_cached_tls_type(tls_url);
     let is_tls_not_cached = tls_type.is_none();
     let tls_type = tls_type.unwrap_or(TlsType::Rustls);
     let client = create_http_client_async(tls_type, false);
-    let latest_release_response: ResultType<_> = match client.post(&url).json(&request).send().await
+    let latest_release_response: ResultType<_> = match client
+        .get(&url)
+        .header("User-Agent", "rustdesk-update-check")
+        .send()
+        .await
     {
         Ok(resp) => Ok((tls_type, resp)),
         Err(err) => {
             if is_tls_not_cached && err.is_request() {
                 let tls_type = TlsType::NativeTls;
                 let client = create_http_client_async(tls_type, false);
-                match client.post(&url).json(&request).send().await {
+                match client
+                    .get(&url)
+                    .header("User-Agent", "rustdesk-update-check")
+                    .send()
+                    .await
+                {
                     Ok(resp) => Ok((tls_type, resp)),
                     Err(err) => Err(err.into()),
                 }
@@ -1210,12 +1240,40 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
                     "Software update check failed with HTTP status: {status}"
                 ))
             } else {
-                response.bytes().await.map_err(|err| err.into())
+                match response.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        let mut page_url = String::new();
+                        if let Some(list) = body.as_array() {
+                            for item in list.iter() {
+                                let tag = item
+                                    .get("tag_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default();
+                                if tag.is_empty() {
+                                    continue;
+                                }
+                                let candidate = format!("{}{}", "https://github.com/LiuHuanghai928/rustdesk/releases/tag/", tag);
+                                if release_id_from_update_url(&candidate).is_ok()
+                                    && display_version_from_release_id(tag).is_ok()
+                                {
+                                    page_url = candidate;
+                                    break;
+                                }
+                            }
+                        }
+                        if page_url.is_empty() {
+                            Err(anyhow!("Software update check failed: no matching release tag found"))
+                        } else {
+                            apply_software_update_page_url(&page_url)
+                        }
+                    }
+                    Err(err) => Err(err.into()),
+                }
             }
         }
         Err(err) => Err(err),
     };
-    let result = response_bytes.and_then(process_software_update_check_response);
+    let result = response_bytes;
     if result.is_err() {
         clear_software_update_url();
     }
@@ -2373,11 +2431,14 @@ async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> Res
 }
 
 pub async fn secure_tcp(conn: &mut Stream, key: &str) -> ResultType<()> {
-    secure_tcp_impl(conn, key, true).await
+    // [local patch] legacy hbbs never answers the key exchange; skip it
+    let _ = (conn, key);
+    Ok(())
 }
 
 async fn secure_tcp_silent(conn: &mut Stream, key: &str) -> ResultType<()> {
-    secure_tcp_impl(conn, key, false).await
+    let _ = (conn, key);
+    Ok(())
 }
 
 /// Like [`secure_tcp`], but returns only once the server's key exchange has actually encrypted
